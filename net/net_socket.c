@@ -32,15 +32,22 @@
 
 #include <net/net_socket.h>
 
-int socket_init(void **address, uint16_t port, const char *server, enum socket_type type)
+int socket_init(void **address, uint16_t port, const char *server,
+      enum socket_type type, int family)
 {
    char port_buf[6];
    struct addrinfo hints      = {0};
    struct addrinfo **addrinfo = (struct addrinfo**)address;
    struct addrinfo *addr      = NULL;
 
-   if (!network_init())
-      return -1;
+   if (!family)
+#if defined(HAVE_SOCKET_LEGACY) || defined(WIIU)
+      family = AF_INET;
+#else
+      family = AF_UNSPEC;
+#endif
+
+   hints.ai_family = family;
 
    switch (type)
    {
@@ -50,15 +57,18 @@ int socket_init(void **address, uint16_t port, const char *server, enum socket_t
       case SOCKET_TYPE_STREAM:
          hints.ai_socktype = SOCK_STREAM;
          break;
-      case SOCKET_TYPE_SEQPACKET:
-         /* TODO/FIXME - implement? */
-         break;
+      default:
+         return -1;
    }
 
    if (!server)
       hints.ai_flags = AI_PASSIVE;
 
+   if (!network_init())
+      return -1;
+
    snprintf(port_buf, sizeof(port_buf), "%hu", (unsigned short)port);
+   hints.ai_flags |= AI_NUMERICSERV;
 
    if (getaddrinfo_retro(server, port_buf, &hints, addrinfo))
       return -1;
@@ -172,7 +182,7 @@ bool socket_set_block(int fd, bool block)
    u_long i = !block;
 
    return !ioctlsocket(fd, FIONBIO, &i);
-#elif !defined(__PSL1GHT__) && defined(__PS3__) || defined(VITA) || defined(WIIU)
+#elif defined(__PS3__) || defined(VITA) || defined(WIIU)
    int i = !block;
 
    return !setsockopt(fd, SOL_SOCKET, SO_NBIO, &i, sizeof(i));
@@ -202,7 +212,7 @@ int socket_close(int fd)
 #if defined(_WIN32) && !defined(_XBOX360)
    /* WinSock has headers from the stone age. */
    return closesocket(fd);
-#elif !defined(__PSL1GHT__) && defined(__PS3__) || defined(WIIU)
+#elif defined(__PS3__) || defined(WIIU)
    return socketclose(fd);
 #elif defined(VITA)
    return sceNetSocketClose(fd);
@@ -214,7 +224,7 @@ int socket_close(int fd)
 int socket_select(int nfds, fd_set *readfds, fd_set *writefds,
       fd_set *errorfds, struct timeval *timeout)
 {
-#if !defined(__PSL1GHT__) && defined(__PS3__)
+#if defined(__PS3__)
    return socketselect(nfds, readfds, writefds, errorfds, timeout);
 #elif defined(VITA)
    int i, j;
@@ -459,6 +469,33 @@ done:
    sceNetEpollDestroy(epoll_fd);
 
    return ret;
+#elif defined(_3DS)
+   int i;
+   int timeout_quotient;
+   int timeout_remainder;
+   int ret = -1;
+
+#define TIMEOUT_DIVISOR 100
+   if (timeout <= TIMEOUT_DIVISOR)
+      return poll(fds, nfds, timeout);
+
+   timeout_quotient = timeout / TIMEOUT_DIVISOR;
+   for (i = 0; i < timeout_quotient; i++)
+   {
+      ret = poll(fds, nfds, TIMEOUT_DIVISOR);
+
+      /* Success or error. */
+      if (ret)
+         return ret;
+   }
+
+   timeout_remainder = timeout % TIMEOUT_DIVISOR;
+   if (timeout_remainder)
+      ret = poll(fds, nfds, timeout_remainder);
+
+   return ret;
+#undef TIMEOUT_DIVISOR
+
 #elif defined(GEKKO)
    return net_poll(fds, nfds, timeout);
 #else
@@ -650,20 +687,9 @@ bool socket_bind(int fd, void *data)
    return !bind(fd, addr->ai_addr, addr->ai_addrlen);
 }
 
-int socket_connect(int fd, void *data, bool timeout_enable)
+int socket_connect(int fd, void *data)
 {
    struct addrinfo *addr = (struct addrinfo*)data;
-
-#if !defined(_WIN32) && !defined(VITA) && !defined(WIIU) && !defined(_3DS)
-   if (timeout_enable)
-   {
-      struct timeval timeout;
-      timeout.tv_sec  = 4;
-      timeout.tv_usec = 0;
-
-      setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
-   }
-#endif
 
 #ifdef WIIU
    {
@@ -677,7 +703,7 @@ int socket_connect(int fd, void *data, bool timeout_enable)
          int sendsz = WIIU_SNDBUF;
 
          setsockopt(fd, SOL_SOCKET, SO_TCPSACK, &op, sizeof(op));
-         setsockopt(fd, SOL_SOCKET, 0x10000, &op, sizeof(op));
+         setsockopt(fd, SOL_SOCKET, SO_RUSRBUF, &op, sizeof(op));
          setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &recvsz, sizeof(recvsz));
          setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sendsz, sizeof(sendsz));
       }
@@ -707,7 +733,7 @@ bool socket_connect_with_timeout(int fd, void *data, int timeout)
          int sendsz = WIIU_SNDBUF;
 
          setsockopt(fd, SOL_SOCKET, SO_TCPSACK, &op, sizeof(op));
-         setsockopt(fd, SOL_SOCKET, 0x10000, &op, sizeof(op));
+         setsockopt(fd, SOL_SOCKET, SO_RUSRBUF, &op, sizeof(op));
          setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &recvsz, sizeof(recvsz));
          setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sendsz, sizeof(sendsz));
       }
@@ -729,7 +755,22 @@ bool socket_connect_with_timeout(int fd, void *data, int timeout)
          return false;
    }
 
-#if !defined(GEKKO) && defined(SO_ERROR)
+#if defined(GEKKO)
+   /* libogc does not have getsockopt implemented */
+   res = connect(fd, addr->ai_addr, addr->ai_addrlen);
+   if (res < 0 && -res != EISCONN)
+      return false;
+#elif defined(_3DS)
+   /* libctru getsockopt does not return expected value */
+   if ((connect(fd, addr->ai_addr, addr->ai_addrlen) < 0) && errno != EISCONN)
+      return false;
+#elif defined(WIIU)
+   /* On WiiU, getsockopt() returns -1 and sets lastsocketerr() (Wii's
+    * equivalent to errno) to 16. */
+   if ((connect(fd, addr->ai_addr, addr->ai_addrlen) == -1)
+         && socketlasterr() != SO_EISCONN)
+      return false;
+#else
    {
       int       error = -1;
       socklen_t errsz = sizeof(error);
@@ -800,6 +841,9 @@ void socket_set_target(void *data, socket_target_t *in_addr)
 {
    struct sockaddr_in *out_target = (struct sockaddr_in*)data;
 
+#ifdef GEKKO
+   out_target->sin_len          = 8;
+#endif
    switch (in_addr->domain)
    {
       case SOCKET_DOMAIN_INET:
@@ -809,13 +853,6 @@ void socket_set_target(void *data, socket_target_t *in_addr)
          out_target->sin_family = 0;
          break;
    }
-#ifndef VITA
-#ifdef GEKKO
-   out_target->sin_len          = 8;
-#endif
-   inet_ptrton(AF_INET, in_addr->server, &out_target->sin_addr);
-#else
-   out_target->sin_addr         = inet_aton(in_addr->server);
-#endif
-   out_target->sin_port         = inet_htons(in_addr->port);
+   out_target->sin_port         = htons(in_addr->port);
+   inet_pton(AF_INET, in_addr->server, &out_target->sin_addr);
 }

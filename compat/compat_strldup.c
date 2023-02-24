@@ -1,7 +1,7 @@
 /* Copyright  (C) 2010-2020 The RetroArch team
  *
  * ---------------------------------------------------------------------------------------
- * The following license statement only applies to this file (features_cpu.h).
+ * The following license statement only applies to this file (compat_strl.c).
  * ---------------------------------------------------------------------------------------
  *
  * Permission is hereby granted, free of charge,
@@ -20,56 +20,14 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-#ifndef _LIBRETRO_SDK_CPU_INFO_H
-#define _LIBRETRO_SDK_CPU_INFO_H
+#include <stdlib.h>
+#include <ctype.h>
 
-#include <retro_common_api.h>
+#include <compat/strl.h>
 
-#include <stdint.h>
-
-#include <libretro.h>
-
-RETRO_BEGIN_DECLS
-
-/**
- * cpu_features_get_perf_counter:
- *
- * Gets performance counter.
- *
- * @return Performance counter.
- **/
-retro_perf_tick_t cpu_features_get_perf_counter(void);
-
-/**
- * cpu_features_get_time_usec:
- *
- * Gets time in microseconds, from an undefined epoch.
- * The epoch may change between computers or across reboots.
- *
- * @return Time in microseconds
- **/
-retro_time_t cpu_features_get_time_usec(void);
-
-/**
- * cpu_features_get:
- *
- * Gets CPU features.
- *
- * @return Bitmask of all CPU features available.
- **/
-uint64_t cpu_features_get(void);
-
-/**
- * cpu_features_get_core_amount:
- *
- * Gets the amount of available CPU cores.
- *
- * @return Amount of CPU cores available.
- **/
-unsigned cpu_features_get_core_amount(void);
-
-void cpu_features_get_model_name(char *name, int len);
-
-RETRO_END_DECLS
-
-#endif
+char *strldup(const char *s, size_t n)
+{
+   char *dst = (char*)malloc(sizeof(char) * (n + 1));
+   strlcpy(dst, s, n);
+   return dst;
+}

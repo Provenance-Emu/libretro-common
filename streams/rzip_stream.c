@@ -561,7 +561,7 @@ int64_t rzipstream_read(rzipstream_t *stream, void *data, int64_t len)
 
       /* Copy as much cached data as possible into
        * the read buffer */
-      memcpy(data_ptr, stream->out_buf + stream->out_buf_ptr, read_size);
+      memcpy(data_ptr, stream->out_buf + stream->out_buf_ptr, (size_t)read_size);
 
       /* Increment pointers and remaining length */
       stream->out_buf_ptr += read_size;
@@ -620,11 +620,15 @@ char* rzipstream_gets(rzipstream_t *stream, char *s, size_t len)
       c = rzipstream_getc(stream);
 
       /* Check for newline and EOF */
-      if ((c == '\n') || (c == EOF))
+      if (c == EOF)
          break;
 
       /* Copy character to string buffer */
       *str_ptr++ = c;
+
+      /* Check for newline and EOF */
+      if (c == '\n')
+          break;
    }
 
    /* Add NUL termination */
@@ -804,7 +808,7 @@ int64_t rzipstream_write(rzipstream_t *stream, const void *data, int64_t len)
 
       /* Copy as much data as possible into
        * the input buffer */
-      memcpy(stream->in_buf + stream->in_buf_ptr, data_ptr, cache_size);
+      memcpy(stream->in_buf + stream->in_buf_ptr, data_ptr, (size_t)cache_size);
 
       /* Increment pointers and remaining length */
       stream->in_buf_ptr  += cache_size;
@@ -1019,7 +1023,9 @@ int64_t rzipstream_tell(rzipstream_t *stream)
    if (!stream)
       return -1;
 
-   return (int64_t)stream->virtual_ptr;
+   if (stream->is_compressed)
+      return (int64_t)stream->virtual_ptr;
+   return filestream_tell(stream->file);
 }
 
 /* Returns true if specified RZIP file contains

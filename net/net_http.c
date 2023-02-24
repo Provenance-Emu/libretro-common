@@ -88,8 +88,12 @@ struct http_connection_t
    int port;
 };
 
-/* URL Encode a string
-   caller is responsible for deleting the destination buffer */
+/**
+ * net_http_urlencode:
+ *
+ * URL Encode a string
+ * caller is responsible for deleting the destination buffer
+ **/
 void net_http_urlencode(char **dest, const char *source)
 {
    static const char urlencode_lut[256] = 
@@ -377,10 +381,16 @@ void net_http_urlencode(char **dest, const char *source)
    (*dest)[len - 1] = '\0';
 }
 
-/* Re-encode a full URL */
+/**
+ * net_http_urlencode_full:
+ *
+ * Re-encode a full URL
+ **/
 void net_http_urlencode_full(char *dest,
       const char *source, size_t size)
 {
+   size_t tmp_len;
+   size_t url_domain_len;
    char url_domain[256];
    char url_path[PATH_MAX_LENGTH];
    size_t buf_pos                    = 0;
@@ -397,11 +407,11 @@ void net_http_urlencode_full(char *dest,
       tmp++;
    }
 
-   strlcpy(url_domain, source, tmp - url_path);
-
+   tmp_len        = strlen(tmp);
+   url_domain_len = ((strlcpy(url_domain, source, tmp - url_path)) - tmp_len) - 1;
    strlcpy(url_path,
-         source + strlen(url_domain) + 1,
-         strlen(tmp) + 1
+         source + url_domain_len + 1,
+         tmp_len + 1
          );
 
    tmp             = NULL;
@@ -417,41 +427,51 @@ static int net_http_new_socket(struct http_connection_t *conn)
 {
    struct addrinfo *addr = NULL, *next_addr = NULL;
    int fd                = socket_init(
-         (void**)&addr, conn->port, conn->domain, SOCKET_TYPE_STREAM);
+         (void**)&addr, conn->port, conn->domain, SOCKET_TYPE_STREAM, 0);
 #ifdef HAVE_SSL
    if (conn->sock_state.ssl)
    {
+      if (fd < 0)
+         goto done;
+
       if (!(conn->sock_state.ssl_ctx = ssl_socket_init(fd, conn->domain)))
-         return -1;
-   }
-#endif
-
-   next_addr = addr;
-
-   while (fd >= 0)
-   {
-#ifdef HAVE_SSL
-      if (conn->sock_state.ssl)
       {
-         if (ssl_socket_connect(conn->sock_state.ssl_ctx,
-               (void*)next_addr, true, true) >= 0)
-            break;
-
-         ssl_socket_close(conn->sock_state.ssl_ctx);
-      }
-      else
-#endif
-      {
-         if (     socket_connect(fd, (void*)next_addr, true) >= 0
-               && socket_nonblock(fd))
-            break;
-
          socket_close(fd);
+         fd = -1;
+         goto done;
       }
 
-      fd = socket_next((void**)&next_addr);
+      /* TODO: Properly figure out what's going wrong when the newer 
+         timeout/poll code interacts with mbed and winsock
+         https://github.com/libretro/RetroArch/issues/14742 */
+
+      /* Temp fix, don't use new timeout/poll code for cheevos http requests */
+         bool timeout = true;
+#ifdef __WIN32
+      if (!strcmp(conn->domain, "retroachievements.org"))
+         timeout = false;
+#endif
+
+      if (ssl_socket_connect(conn->sock_state.ssl_ctx, addr, timeout, true)
+            < 0)
+      {
+         fd = -1;
+         goto done;
+      }
+   }
+   else
+#endif
+   for (next_addr = addr; fd >= 0; fd = socket_next((void**)&next_addr))
+   {
+      if (socket_connect_with_timeout(fd, next_addr, 5000))
+         break;
+
+      socket_close(fd);
    }
 
+#ifdef HAVE_SSL
+done:
+#endif
    if (addr)
       freeaddrinfo_retro(addr);
 
@@ -547,6 +567,11 @@ error:
    return NULL;
 }
 
+/**
+ * net_http_connection_iterate:
+ *
+ * Leaf function.
+ **/
 bool net_http_connection_iterate(struct http_connection_t *conn)
 {
    if (!conn)
@@ -849,7 +874,7 @@ error:
       conn->postdatacopy    = NULL;
    }
 #ifdef HAVE_SSL
-   if (conn && conn->sock_state.ssl && conn->sock_state.ssl_ctx && fd >= 0)
+   if (conn && conn->sock_state.ssl_ctx)
    {
       ssl_socket_close(conn->sock_state.ssl_ctx);
       ssl_socket_free(conn->sock_state.ssl_ctx);
@@ -864,6 +889,14 @@ error:
    return NULL;
 }
 
+/**
+ * net_http_fd:
+ *
+ * Leaf function.
+ *
+ * You can use this to call net_http_update
+ * only when something will happen; select() it for reading.
+ **/
 int net_http_fd(struct http_t *state)
 {
    if (!state)
@@ -871,6 +904,12 @@ int net_http_fd(struct http_t *state)
    return state->sock_state.fd;
 }
 
+/**
+ * net_http_update:
+ *
+ * @return true if it's done, or if something broke.
+ * @total will be 0 if it's not known.
+ **/
 bool net_http_update(struct http_t *state, size_t* progress, size_t* total)
 {
    ssize_t newlen = 0;
@@ -1117,6 +1156,15 @@ parse_again:
    return (state->part == P_DONE);
 }
 
+/**
+ * net_http_status:
+ *
+ * Report HTTP status. 200, 404, or whatever.
+ *
+ * Leaf function.
+ * 
+ * @return HTTP status code.
+ **/
 int net_http_status(struct http_t *state)
 {
    if (!state)
@@ -1124,12 +1172,21 @@ int net_http_status(struct http_t *state)
    return state->status;
 }
 
+/**
+ * net_http_data:
+ *
+ * Leaf function.
+ *
+ * @return the downloaded data. The returned buffer is owned by the
+ * HTTP handler; it's freed by net_http_delete().
+ * If the status is not 20x and accept_error is false, it returns NULL.
+ **/
 uint8_t* net_http_data(struct http_t *state, size_t* len, bool accept_error)
 {
    if (!state)
       return NULL;
 
-   if (!accept_error && net_http_error(state))
+   if (!accept_error && (state->error || state->status < 200 || state->status > 299))
    {
       if (len)
          *len = 0;
@@ -1142,6 +1199,11 @@ uint8_t* net_http_data(struct http_t *state, size_t* len, bool accept_error)
    return (uint8_t*)state->data;
 }
 
+/**
+ * net_http_delete:
+ *
+ * Cleans up all memory.
+ **/
 void net_http_delete(struct http_t *state)
 {
    if (!state)
@@ -1149,19 +1211,26 @@ void net_http_delete(struct http_t *state)
 
    if (state->sock_state.fd >= 0)
    {
-      socket_close(state->sock_state.fd);
 #ifdef HAVE_SSL
       if (state->sock_state.ssl && state->sock_state.ssl_ctx)
       {
+         ssl_socket_close(state->sock_state.ssl_ctx);
          ssl_socket_free(state->sock_state.ssl_ctx);
          state->sock_state.ssl_ctx = NULL;
       }
+      else
 #endif
+      socket_close(state->sock_state.fd);
    }
    free(state);
 }
 
+/**
+ * net_http_error:
+ *
+ * Leaf function
+ **/
 bool net_http_error(struct http_t *state)
 {
-   return (state->error || state->status<200 || state->status>299);
+   return (state->error || state->status < 200 || state->status > 299);
 }
